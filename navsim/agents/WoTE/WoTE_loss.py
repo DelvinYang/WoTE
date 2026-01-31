@@ -1,3 +1,4 @@
+# WoTE 损失函数集合
 from typing import Dict
 from scipy.optimize import linear_sum_assignment
 
@@ -17,6 +18,7 @@ def compute_wote_loss(
     predictions,
     config,
 ) -> torch.Tensor:
+    """统一计算 WoTE 训练损失（offset、奖励、Agent/Map）。"""
     loss_dict = {}
     # offset regression
     traj_offset_loss = compute_traj_offset_loss(predictions, targets, config)
@@ -28,7 +30,7 @@ def compute_wote_loss(
     offset_im_reward_loss = compute_im_reward_loss(targets, imitation_rewards, trajectory_anchors)
     loss_dict['offset_im_reward_loss'] = offset_im_reward_loss * config.offset_im_reward_weight
 
-    # im & sim rewards
+    # 模仿奖励与指标奖励
     trajectory_anchors = predictions["trajectory_anchors"]
     imitation_rewards = predictions["im_rewards"]
     im_reward_loss = compute_im_reward_loss(targets, imitation_rewards, trajectory_anchors)
@@ -39,6 +41,7 @@ def compute_wote_loss(
     loss_dict['im_reward_loss'] = im_reward_loss
     loss_dict['sim_reward_loss'] = sim_reward_loss
 
+    # Agent 检测损失（可选）
     use_agent_loss = config.use_agent_loss if hasattr(config, "use_agent_loss") else True
     if use_agent_loss:
         agent_cls_loss, agent_box_loss = compute_wote_agent_loss(
@@ -54,6 +57,7 @@ def compute_wote_loss(
         loss_dict['agent_cls_loss'] = agent_cls_loss * agent_class_weight
         loss_dict['agent_box_loss'] = agent_box_loss * agent_box_weight
 
+    # Map 语义图损失（可选）
     if config.use_map_loss:
         use_focal_loss_for_map = config.use_focal_loss_for_map if hasattr(config, 'use_focal_loss_for_map') else False
         focal_loss_alpha = config.focal_loss_alpha if hasattr(config, 'focal_loss_alpha') else 0.25
@@ -145,6 +149,7 @@ def compute_im_reward_loss(
     prediction_rewards,
     trajectory_anchors,
 ) -> torch.Tensor:
+    """模仿奖励：用 GT 与 anchor 距离生成 soft label。"""
     Bz = targets["trajectory"].shape[0]
     # Get target trajectory
     target_trajectory = targets["trajectory"][:, -1]  # the last frame
@@ -169,6 +174,7 @@ def compute_sim_reward_loss(
     targets: Dict[str, torch.Tensor],
     predicted_rewards: torch.Tensor,
 ) -> torch.Tensor:
+    """指标奖励 BCE 损失。"""
     epsilon = 1e-6
     # Load precomputed target rewards
     batch_size = targets['sim_reward'].shape[0]
@@ -206,6 +212,7 @@ def compute_wote_agent_loss(
     num_gt_instances = gt_valid.sum()
     num_gt_instances = num_gt_instances if num_gt_instances > 0 else num_gt_instances + 1
 
+    # 匹配代价：分类 + 回归
     ce_cost = _get_ce_cost(gt_valid, pred_logits)
     l1_cost = _get_l1_cost(gt_states, pred_states, gt_valid)
 
@@ -214,6 +221,7 @@ def compute_wote_agent_loss(
     cost = agent_class_weight * ce_cost + agent_box_weight * l1_cost
     cost = cost.cpu()
 
+    # Hungarian 匹配
     indices = [linear_sum_assignment(c) for i, c in enumerate(cost)]
     matching = [
         (torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64))
@@ -309,6 +317,7 @@ class FocalLoss(torch.nn.Module):
         self.epsilon = epsilon
 
     def forward(self, inputs, targets):
+        """多类 focal loss（用于语义分割）。"""
         # inputs: [batch_size, num_classes, ...]
         # targets: [batch_size, ...]
 

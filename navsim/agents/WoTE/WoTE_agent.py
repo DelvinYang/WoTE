@@ -1,3 +1,4 @@
+# WoTE Agent 实现
 from typing import Any, List, Dict, Union
 import torch
 import numpy as np
@@ -8,6 +9,7 @@ from torchvision import transforms
 
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
+# 基类与数据结构
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.common.dataclasses import AgentInput, SensorConfig
 from navsim.planning.training.abstract_feature_target_builder import (
@@ -15,6 +17,7 @@ from navsim.planning.training.abstract_feature_target_builder import (
     AbstractTargetBuilder,
 )
 from navsim.common.dataclasses import Scene
+# 依赖模型与工具
 import timm, cv2
 from navsim.agents.WoTE.WoTE_model import WoTEModel
 from navsim.agents.WoTE.WoTE_loss import compute_wote_loss
@@ -27,6 +30,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 import torch.optim as optim
 
 def build_from_configs(obj, cfg: DictConfig, **kwargs):
+    """从配置字典构建对象（类似 MMCV 风格）。"""
     if cfg is None:
         return None
     cfg = cfg.copy()
@@ -47,14 +51,17 @@ class WoTEAgent(AbstractAgent):
         use_wm=False,
     ):
         super().__init__()
+        # 训练/评测关键超参
         self._trajectory_sampling = trajectory_sampling
         self._checkpoint_path = checkpoint_path
         self._lr = lr
         self.max_epochs = config.max_epochs if hasattr(config, 'max_epochs') else 100
         self.min_lr = config.min_lr if hasattr(config, 'min_lr') else 1e-6
 
+        # 核心模型
         self.WoTE_model = WoTEModel(config)
 
+        # 传感器帧采样设置
         self.slice_indices = slice_indices
         self.is_eval = False
         self.config = config
@@ -69,6 +76,7 @@ class WoTEAgent(AbstractAgent):
 
     def initialize(self) -> None:
         """Inherited, see superclass."""
+        # 加载 checkpoint（兼容 CPU/GPU）
         if torch.cuda.is_available():
             state_dict: Dict[str, Any] = torch.load(self._checkpoint_path)["state_dict"]
         else:
@@ -76,16 +84,20 @@ class WoTEAgent(AbstractAgent):
                 self._checkpoint_path, map_location=torch.device("cpu")
             )["state_dict"]
         
+        # trajectory_anchors 由模型内部生成，避免覆盖
         if "agent.WoTE_model.trajectory_anchors" in state_dict:
             del state_dict["agent.WoTE_model.trajectory_anchors"]
 
+        # 去掉 "agent." 前缀并加载
         self.load_state_dict({k.replace("agent.", ""): v for k, v in state_dict.items()}, strict=False)
 
     def get_sensor_config(self) -> SensorConfig:
         """Inherited, see superclass."""
+        # 只加载特定帧的传感器
         return SensorConfig.build_tfu_sensors(self.slice_indices) 
 
     def get_target_builders(self) -> List[AbstractTargetBuilder]:
+        """构建目标（label）生成器。"""
         return [
             WoTETargetBuilder(
                         trajectory_sampling=self._trajectory_sampling,
@@ -96,9 +108,11 @@ class WoTEAgent(AbstractAgent):
         ]
 
     def get_feature_builders(self) -> List[AbstractFeatureBuilder]:
+        """构建特征生成器。"""
         return [WoTEFeatureBuilder(self.slice_indices, self.config)]
 
     def forward(self, features: Dict[str, torch.Tensor], targets=None) -> Dict[str, torch.Tensor]:
+        """训练/评测分支的前向。"""
         if not self.is_eval: #training
             return self.WoTE_model.forward_train(features, targets)
         else:
@@ -110,9 +124,11 @@ class WoTEAgent(AbstractAgent):
         targets: Dict[str, torch.Tensor],
         predictions: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
+        """损失函数封装。"""
         return compute_wote_loss(targets, predictions, self.config)
 
     def get_optimizers(self) -> Union[Optimizer, Dict[str, Union[Optimizer, LRScheduler]]]:
+        """返回优化器（可选 CosLR）。"""
         use_coslr_opt = self.config.use_coslr_opt if hasattr(self.config, 'use_coslr_opt') else False
         if use_coslr_opt:
             return self.get_coslr_optimizers()
@@ -120,6 +136,7 @@ class WoTEAgent(AbstractAgent):
             return torch.optim.Adam(self.WoTE_model.parameters(), lr=self._lr)
     
     def get_coslr_optimizers(self):
+        """构建带 warmup 的 cosine 学习率调度。"""
         optimizer_cfg = dict(type=self.config.optimizer_type, 
                             lr=self._lr, 
                             weight_decay=self.config.weight_decay,
@@ -136,6 +153,7 @@ class WoTEAgent(AbstractAgent):
         with open_dict(optimizer_cfg):
             paramwise_cfg = optimizer_cfg.pop('paramwise_cfg', None)
 
+        # 若配置了 paramwise，按参数名分组
         if paramwise_cfg:
             params = []
             pgs = [[] for _ in paramwise_cfg['name']]
@@ -178,6 +196,7 @@ class WarmupCosLR(_LRScheduler):
     def __init__(
         self, optimizer, min_lr, lr, warmup_epochs, epochs, last_epoch=-1, verbose=False
     ) -> None:
+        # 记录超参
         self.min_lr = min_lr
         self.lr = lr
         self.epochs = epochs
@@ -204,10 +223,12 @@ class WarmupCosLR(_LRScheduler):
         self.__dict__.update(state_dict)
 
     def get_init_lr(self):
+        """warmup 初始学习率。"""
         lr = self.lr / self.warmup_epochs
         return lr
 
     def get_lr(self):
+        """warmup + cosine 衰减曲线。"""
         if self.last_epoch < self.warmup_epochs:
             lr = self.lr * (self.last_epoch + 1) / self.warmup_epochs
         else:

@@ -1,3 +1,4 @@
+# WoTE 目标构建器（轨迹/Agent/BEV 监督）
 from typing import Any, List, Dict, Union
 import numpy.typing as npt
 import torch
@@ -6,6 +7,7 @@ from torchvision import transforms
 import time
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 
+# 基类与数据结构
 from navsim.agents.abstract_agent import AbstractAgent
 from navsim.common.dataclasses import AgentInput, SensorConfig
 from navsim.planning.training.abstract_feature_target_builder import (
@@ -18,9 +20,11 @@ from navsim.common.enums import BoundingBoxIndex, LidarIndex
 from navsim.planning.scenario_builder.navsim_scenario_utils import tracked_object_types
 from enum import IntEnum
 
+# 几何处理
 from shapely import affinity
 from shapely.geometry import Polygon, LineString
 
+# nuPlan 地图与几何
 from nuplan.common.maps.abstract_map import AbstractMap, SemanticMapLayer, MapObject
 from nuplan.common.actor_state.oriented_box import OrientedBox
 from nuplan.common.actor_state.state_representation import StateSE2
@@ -33,6 +37,7 @@ from copy import deepcopy
 
 
 class WoTETargetBuilder(AbstractTargetBuilder):
+    """WoTE 监督信号构建：轨迹、仿真奖励、Agent 检测、BEV 语义图等。"""
     def __init__(self, 
                 trajectory_sampling: TrajectorySampling,
                 slice_indices=[3],
@@ -43,12 +48,14 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         self._trajectory_sampling = trajectory_sampling
         self.slice_indices = slice_indices
 
+        # 预计算的仿真奖励（可选）
         self.sim_reward_dict_path = sim_reward_dict_path
         if self.sim_reward_dict_path is not None:
             self.sim_reward_dict = np.load(self.sim_reward_dict_path, allow_pickle=True).item() 
             self.sim_keys = ['no_at_fault_collisions', 'drivable_area_compliance', 'ego_progress', 'time_to_collision_within_bound', 'comfort']
         
         self.future_idx = config.future_idx if hasattr(config, 'future_idx') else 11
+        # 轨迹 anchors 与采样
         cluster_file = self._config.cluster_file_path
         self.trajectory_anchors_all = np.load(cluster_file)
         self.num_sampled_trajs = config.num_sampled_trajs
@@ -61,11 +68,12 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         return "WoTE_target"
 
     def compute_targets(self, scene: Scene) -> Dict[str, torch.Tensor]:
+        """从 Scene 构建训练监督信号。"""
         result = {}
         future_trajectory_list = [] 
         sim_reward_list = []
 
-        # compute trajectory
+        # 计算未来轨迹（相对坐标）
         assert len(self.slice_indices) == 1, "Slice indices must be of length 1"
         index = self.slice_indices[0]
         frame_offset = index - 3 # max is 3
@@ -76,7 +84,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         future_trajectory = torch.tensor(future_trajectory.poses)
         future_trajectory_list.append(future_trajectory)
         
-        # obtain sim scores
+        # 读取仿真奖励（若提供）
         if self.sim_reward_dict_path is not None:
             token = scene.frames[index].token
             sim_reward_dict_single = self.sim_reward_dict[token]['trajectory_scores'][0]
@@ -92,7 +100,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
             sim_reward_stacked = torch.stack(sim_reward_list) 
             result['sim_reward'] = sim_reward_stacked
 
-        # agent targets
+        # Agent 目标（检测）
         use_agent_loss = self._config.use_agent_loss if hasattr(self._config, "use_agent_loss") else True
         if use_agent_loss:
             # current agent labels
@@ -103,6 +111,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
             result["agent_labels"] = agent_labels
 
 
+        # BEV 语义图目标
         if self._config.use_map_loss:
             cur_map_index = self.slice_indices[0]
             annotations = scene.frames[cur_map_index].annotations
@@ -114,8 +123,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
             bev_semantic_map = self._add_ego_box_to_bev_map(bev_semantic_map, cur_ego_box)
             result["bev_semantic_map"] = bev_semantic_map
 
-        # future agent labels
-        # transform from future to current ego frame
+        # 未来帧 Agent 标签：从未来 ego 坐标系变换到当前
         frame_interval = self.future_idx - self.slice_indices[0] - 1
         ref_frame_offset = future_trajectory.numpy()[frame_interval]
         fut_annotations = scene.frames[self.future_idx].annotations
@@ -125,7 +133,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         fut_anno_in_cur_frame = deepcopy(fut_annotations)
         fut_anno_in_cur_frame.boxes = fut_annotations_in_cur_frame_boxes
 
-        # for agent targets
+        # 未来 Agent 目标（用于多轨迹监督）
         fut_agent_states, fut_agent_labels = self._compute_agent_targets(fut_anno_in_cur_frame)
 
         fut_agent_states = np.tile(fut_agent_states[np.newaxis, :, :], (self.num_sampled_trajs, 1, 1))
@@ -133,11 +141,11 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         result["fut_agent_states"] = fut_agent_states
         result["fut_agent_labels"] = fut_agent_labels
 
-        # for map targets
+        # 未来 BEV 语义图目标（多轨迹）
         ego_pose = StateSE2(*scene.frames[cur_map_index].ego_status.ego_pose)
         fut_bev_semantic_map = self._compute_bev_semantic_map(fut_anno_in_cur_frame, scene.map_api, ego_pose)
 
-        ## for maps with multiple ego boxes
+        # 为多条采样轨迹添加不同的 ego box
         fut_bev_semantic_map_list = []
         random_sample_idx = self.rng.choice(self.trajectory_anchors_all.shape[0], self.num_sampled_trajs, replace=False)
         sampled_trajectory_anchors = self.trajectory_anchors_all[random_sample_idx]
@@ -208,6 +216,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
                 config.lidar_min_y <= y <= config.lidar_max_y
             )
 
+        # 过滤车辆类型并投影到 LiDAR 范围
         for box, name in zip(annotations.boxes, annotations.names):
             box_x, box_y, box_heading, box_length, box_width = (
                 box[BoundingBoxIndex.X],
@@ -224,7 +233,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
 
         agents_states_arr = np.array(agent_states_list)
 
-        # filter num_instances nearest
+        # 按距离选择最近的若干个目标
         agent_states = np.zeros((max_agents, BoundingBox2DIndex.size()), dtype=np.float32)
         agent_labels = np.zeros(max_agents, dtype=bool)
 
@@ -249,6 +258,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :param ego_pose: ego pose in global frame
         :return: 2D torch tensor of semantic labels (excluding ego box)
         """
+        # 构建空 BEV 语义图，再按类别填充
         bev_semantic_map = np.zeros(self._config.bev_semantic_frame, dtype=np.int64)
         for label, (entity_type, layers) in self._config.bev_semantic_classes.items():
             if entity_type == "polygon":
@@ -268,6 +278,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :param ego_box: ego vehicle box description (x, y, z, length, width, height, yaw)
         :return: 2D torch tensor of semantic labels with ego box added
         """
+        # 将 ego box 作为单独类别写入
         entity_mask = self._compute_ego_box_mask(ego_box)
         bev_semantic_map[entity_mask] = self._config.ego_box_map_idx  # Assuming label for ego_box
 
@@ -282,6 +293,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :param layers: bounding box labels to include
         :return: binary mask as numpy array
         """
+        # 生成 ego box 的多边形 mask
         box_polygon_mask = np.zeros(self._config.bev_semantic_frame[::-1], dtype=np.uint8)
         # box_value = (x, y, z, length, width, height, yaw) TODO: add intenum
         x, y, heading = box_value[0], box_value[1], box_value[-1]
@@ -290,7 +302,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         exterior = np.array(agent_box.geometry.exterior.coords).reshape((-1, 1, 2))
         exterior = self._coords_to_pixel(exterior)
         cv2.fillPoly(box_polygon_mask, [exterior], color=255)
-        # OpenCV has origin on top-left corner
+        # OpenCV 原点在左上，需旋转回 BEV 坐标
         box_polygon_mask = np.rot90(box_polygon_mask)[::-1]
         return box_polygon_mask > 0
 
@@ -305,6 +317,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :return: binary mask as numpy array
         """
 
+        # 查询附近 map objects，并绘制多边形
         map_object_dict = map_api.get_proximal_map_objects(
             point=ego_pose.point, radius=self._config.bev_radius, layers=layers
         )
@@ -329,6 +342,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :param layers: map layers
         :return: binary mask as numpy array
         """
+        # 查询附近 map objects，并绘制线段
         map_object_dict = map_api.get_proximal_map_objects(
             point=ego_pose.point, radius=self._config.bev_radius, layers=layers
         )
@@ -354,6 +368,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :param layers: bounding box labels to include
         :return: binary mask as numpy array
         """
+        # 绘制目标 box mask
         box_polygon_mask = np.zeros(self._config.bev_semantic_frame[::-1], dtype=np.uint8)
         for name_value, box_value in zip(annotations.names, annotations.boxes):
             agent_type = tracked_object_types[name_value]
@@ -418,7 +433,7 @@ class WoTETargetBuilder(AbstractTargetBuilder):
         :return: _description_
         """
 
-        # NOTE: remove half in backward direction
+        # NOTE: 坐标原点在车中心，向前为正
         pixel_center = np.array([[0, self._config.bev_pixel_width / 2.0]])
         coords_idcs = (coords / self._config.bev_pixel_size) + pixel_center
 

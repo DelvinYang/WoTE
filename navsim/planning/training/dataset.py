@@ -1,23 +1,28 @@
+# 压缩/文件相关
 import gzip
 import os
 from pathlib import Path
 
+# 日志与序列化
 import logging
 import pickle
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 import torch
 
+# 数据加载与特征/目标构建器
 from navsim.common.dataloader import SceneLoader
 from navsim.planning.training.abstract_feature_target_builder import (
     AbstractFeatureBuilder,
     AbstractTargetBuilder,
 )
 
+# 模块级日志
 logger = logging.getLogger(__name__)
 
 
 def load_feature_target_from_pickle(path: Path) -> Dict[str, torch.Tensor]:
+    """读取单个特征/目标缓存文件（gzip + pickle）。"""
     with gzip.open(path, "rb") as f:
         data_dict: Dict[str, torch.Tensor] = pickle.load(f)
     return data_dict
@@ -30,6 +35,7 @@ def dump_feature_target_to_pickle(path: Path, data_dict: Dict[str, torch.Tensor]
 
 
 class CacheOnlyDataset(torch.utils.data.Dataset):
+    """仅从缓存读取特征/目标，不依赖 SceneLoader。"""
     def __init__(
         self,
         cache_path: str,
@@ -41,6 +47,7 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
         assert Path(cache_path).is_dir(), f"Cache path {cache_path} does not exist!"
         self._cache_path = Path(cache_path)
 
+        # 过滤有效的 log 目录
         if log_names is not None:
             self.log_names = [Path(l) for l in log_names if (self._cache_path / l).is_dir()]
         else:
@@ -48,6 +55,7 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
 
         self._feature_builders = feature_builders
         self._target_builders = target_builders
+        # 预扫描缓存，记录完整的 token -> 路径
         self._valid_cache_paths: Dict[str, Path] = self._load_valid_caches(
             cache_path=self._cache_path,
             feature_builders=self._feature_builders,
@@ -72,6 +80,7 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
 
         valid_cache_paths: Dict[str, Path] = {}
 
+        # 遍历每个 log，确认各 builder 的缓存文件是否齐全
         for log_name in tqdm(log_names, desc="Loading Valid Caches"):
             log_path = cache_path / log_name
             for token_path in log_path.iterdir():
@@ -90,12 +99,14 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
 
         token_path = self._valid_cache_paths[token]
 
+        # 合并所有特征缓存
         features: Dict[str, torch.Tensor] = {}
         for builder in self._feature_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
             data_dict = load_feature_target_from_pickle(data_dict_path)
             features.update(data_dict)
 
+        # 合并所有目标缓存
         targets: Dict[str, torch.Tensor] = {}
         for builder in self._target_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
@@ -106,6 +117,7 @@ class CacheOnlyDataset(torch.utils.data.Dataset):
 
 
 class Dataset(torch.utils.data.Dataset):
+    """训练用数据集：可按需计算或读取缓存。"""
     def __init__(
         self,
         scene_loader: SceneLoader,
@@ -120,15 +132,18 @@ class Dataset(torch.utils.data.Dataset):
         self._feature_builders = feature_builders
         self._target_builders = target_builders
 
+        # 缓存设置
         self._cache_path: Optional[Path] = Path(cache_path) if cache_path else None
         self._force_cache_computation = force_cache_computation
         self._valid_cache_paths: Dict[str, Path] = self._load_valid_caches(
             self._cache_path, feature_builders, target_builders
         )
 
+        # 若配置了缓存路径，先进行缓存构建
         if self._cache_path is not None:
             self.cache_dataset()
         
+        # 是否使用未来帧生成输入
         self.use_fut_frames = use_fut_frames
 
     @staticmethod
@@ -153,6 +168,7 @@ class Dataset(torch.utils.data.Dataset):
         return valid_cache_paths
 
     def _cache_scene_with_token(self, token: str) -> None:
+        """对单个 token 计算特征/目标并写入缓存。"""
 
         scene = self._scene_loader.get_scene_from_token(token)
         agent_input = scene.get_agent_input()
@@ -161,11 +177,13 @@ class Dataset(torch.utils.data.Dataset):
         token_path = self._cache_path / metadata.log_name / metadata.initial_token
         os.makedirs(token_path, exist_ok=True)
 
+        # 逐个特征 builder 写缓存
         for builder in self._feature_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
             data_dict = builder.compute_features(agent_input)
             dump_feature_target_to_pickle(data_dict_path, data_dict)
 
+        # 逐个目标 builder 写缓存
         for builder in self._target_builders:
             data_dict_path = token_path / (builder.get_unique_name() + ".gz")
             data_dict = builder.compute_targets(scene)
@@ -194,6 +212,7 @@ class Dataset(torch.utils.data.Dataset):
         return (features, targets)
 
     def cache_dataset(self) -> None:
+        """根据场景批量缓存特征/目标。"""
         assert self._cache_path is not None, "Dataset did not receive a cache path!"
         os.makedirs(self._cache_path, exist_ok=True)
 
@@ -223,6 +242,7 @@ class Dataset(torch.utils.data.Dataset):
         features: Dict[str, torch.Tensor] = {}
         targets: Dict[str, torch.Tensor] = {}
 
+        # 若有缓存则直接读取，否则在线构建
         if self._cache_path is not None:
             assert (
                 token in self._valid_cache_paths.keys()

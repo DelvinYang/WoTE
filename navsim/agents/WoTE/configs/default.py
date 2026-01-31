@@ -1,3 +1,4 @@
+# WoTE 默认配置
 from dataclasses import dataclass
 from typing import List, Tuple, Dict
 
@@ -9,14 +10,17 @@ from nuplan.planning.simulation.trajectory.trajectory_sampling import Trajectory
 @dataclass
 class WoTEConfig:
 
+    # 轨迹采样配置
     trajectory_sampling: TrajectorySampling = TrajectorySampling(
         time_horizon=4, interval_length=0.5
     )
 
+    # Backbone 与输入配置
     resnet34_path = '/home/yingyan.li/repo/WoTE/ckpts/resnet34.pth'
     image_architecture: str = "resnet34"
     lidar_architecture: str = "resnet34"
 
+    # LiDAR BEV 直方图配置
     max_height_lidar: float = 100.0
     pixels_per_meter: float = 4.0
     hist_max_per_pixel: int = 5
@@ -33,6 +37,7 @@ class WoTEConfig:
     # new
     lidar_seq_len: int = 1
 
+    # 图像与 LiDAR 分辨率
     camera_width: int = 1024
     camera_height: int = 256
     lidar_resolution_width = 256
@@ -43,6 +48,7 @@ class WoTEConfig:
     lidar_vert_anchors: int = 256 // 32
     lidar_horz_anchors: int = 256 // 32
 
+    # Backbone/Transformer 超参
     block_exp = 4
     n_layer = 2  # Number of transformer layers used in the vision backbone
     n_head = 4
@@ -65,6 +71,7 @@ class WoTEConfig:
     detect_boxes = False
     use_bev_semantic = False
     
+    # 是否开启语义/深度等额外特征
     use_semantic = False
     use_depth = False
     add_features = True
@@ -100,6 +107,7 @@ class WoTEConfig:
     use_ego_box_in_map = True
     ego_box_map_idx = 7
 
+    # BEV 分辨率与通道
     bev_pixel_width: int = lidar_resolution_width
     bev_pixel_height: int = lidar_resolution_height // 2
     bev_pixel_size: float = 0.25

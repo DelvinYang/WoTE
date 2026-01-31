@@ -1,3 +1,4 @@
+# PDM 评分器：对轨迹进行多指标打分
 import copy
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -6,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 from nuplan.common.actor_state.vehicle_parameters import VehicleParameters, get_pacifica_parameters
 
+# nuPlan 依赖
 from nuplan.common.actor_state.state_representation import StateSE2
 from nuplan.common.actor_state.tracked_objects_types import AGENT_TYPES
 from nuplan.common.maps.abstract_map import AbstractMap
@@ -19,6 +21,7 @@ from nuplan.planning.simulation.observation.idm.utils import (
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from shapely import Point, creation
 
+# PDM 相关结构
 from navsim.planning.simulation.planner.pdm_planner.observation.pdm_observation import (
     PDMObservation,
 )
@@ -47,6 +50,7 @@ import time
 
 @dataclass
 class PDMScorerConfig:
+    """PDM 评分器超参数。"""
     
     # weighted metric weights
     progress_weight: float = 5.0
@@ -140,7 +144,7 @@ class PDMScorer:
         :return: array containing score of each proposal
         """
 
-        # initialize & lazy load class values
+        # 初始化与 lazy load
         self._reset(
             states,
             observation,
@@ -149,15 +153,15 @@ class PDMScorer:
             drivable_area_map,
         )
 
-        # fill value ego-area array (used in multiple metrics)
+        # 计算 ego footprint 覆盖区域（多指标共用）
         self._calculate_ego_area()
 
-        # 1. multiplicative metrics
+        # 1. 乘法指标（违规即为 0）
         self._calculate_no_at_fault_collision()
         self._calculate_drivable_area_compliance()
         self._calculate_driving_direction_compliance()
 
-        # 2. weighted metrics
+        # 2. 加权指标（进度/舒适/ttc）
         self._calculate_progress()
         self._calculate_ttc()
         self._calculate_is_comfortable()
@@ -170,10 +174,10 @@ class PDMScorer:
         :return: array containing score of each proposal
         """
 
-        # accumulate multiplicative metrics
+        # 乘法指标累积
         multiplicate_sim_rewards = self._multi_metrics.prod(axis=0)
 
-        # normalize and fill progress values
+        # 归一化 progress，避免尺度问题
         raw_progress = self._progress_raw * multiplicate_sim_rewards
         max_raw_progress = np.max(raw_progress)
         if max_raw_progress > self._config.progress_distance_threshold:
@@ -184,14 +188,14 @@ class PDMScorer:
         self._weighted_metrics[WeightedMetricIndex.PROGRESS] = normalized_progress
 
 
-        # accumulate weighted metrics
+        # 加权指标累积
         weighted_metrics_array = self._config.weighted_metrics_array
         weighted_sim_rewards = (self._weighted_metrics * weighted_metrics_array[..., None]).sum(
             axis=0
         )
         weighted_sim_rewards /= weighted_metrics_array.sum()
 
-        # calculate final scores
+        # 最终分数：乘法 * 加权
         final_scores = self._multi_metrics.prod(axis=0) * weighted_sim_rewards
 
         return final_scores
@@ -223,13 +227,13 @@ class PDMScorer:
 
         self._num_proposals = states.shape[0]
 
-        # save ego state values
+        # 保存状态数组
         self._states = states
 
-        # calculate coordinates of ego corners and center
+        # 计算车体角点与中心点
         self._ego_coords = state_array_to_coords_array(states, self._vehicle_parameters)
 
-        # initialize all ego polygons from corners
+        # 由角点构建多边形
         self._ego_polygons = coords_array_to_polygon_array(self._ego_coords)
 
         # zero initialize all remaining arrays.

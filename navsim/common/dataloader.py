@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# 压缩/序列化
 import lzma
 import pickle
 
@@ -12,6 +13,7 @@ from navsim.planning.metric_caching.metric_cache import MetricCache
 import numpy as np
 
 def filter_scenes(data_path: Path, scene_filter: SceneFilter) -> Dict[str, List[Dict[str, Any]]]:
+    """按 SceneFilter 从日志文件中过滤场景帧序列。"""
 
     def split_list(input_list: List[Any], num_frames: int, frame_interval: int) -> List[List[Any]]:
         return [input_list[i : i + num_frames] for i in range(0, len(input_list), frame_interval)]
@@ -19,7 +21,7 @@ def filter_scenes(data_path: Path, scene_filter: SceneFilter) -> Dict[str, List[
     filtered_scenes: Dict[str, Scene] = {}
     stop_loading: bool = False
 
-    # filter logs
+    # 过滤日志文件
     log_files = list(data_path.iterdir())
     if scene_filter.log_names is not None:
         log_files = [
@@ -28,6 +30,7 @@ def filter_scenes(data_path: Path, scene_filter: SceneFilter) -> Dict[str, List[
             if log_file.name.replace(".pkl", "") in scene_filter.log_names
         ]
 
+    # 过滤 token（可选）
     if scene_filter.tokens is not None:
         filter_tokens = True
         tokens = set(scene_filter.tokens)
@@ -80,6 +83,7 @@ class SceneLoader:
         sensor_config: SensorConfig = SensorConfig.build_no_sensors(),
         train_debug: bool = False,
     ):
+        """加载并缓存场景帧字典，支持调试模式。"""
         if train_debug:
             print('begin loading scene_frames_dicts')
             self.scene_frames_dicts = np.load('/home/yingyan.li/repo/WoTE/dataset/scene_frames_dicts_debug.npy', allow_pickle=True).item()
@@ -94,6 +98,7 @@ class SceneLoader:
 
     @property
     def tokens(self) -> List[str]:
+        """所有场景的 token 列表。"""
         return list(self.scene_frames_dicts.keys())
 
     def __len__(self):
@@ -103,6 +108,7 @@ class SceneLoader:
         return self.tokens[idx]
 
     def get_scene_from_token(self, token: str) -> Scene:
+        """根据 token 构建 Scene 对象。"""
         assert token in self.tokens
         return Scene.from_scene_dict_list(
             self.scene_frames_dicts[token],
@@ -113,6 +119,7 @@ class SceneLoader:
         )
 
     def get_agent_input_from_token(self, token: str, use_fut_frames=False) -> AgentInput:
+        """根据 token 构建 AgentInput（可选未来帧）。"""
         assert token in self.tokens
         return AgentInput.from_scene_dict_list(
             self.scene_frames_dicts[token],
@@ -123,7 +130,7 @@ class SceneLoader:
         )
 
     def get_tokens_list_per_log(self) -> Dict[str, List[str]]:
-        # generate a dict that contains a list of tokens for each log-name
+        # 生成每个 log 对应 token 列表的字典
         tokens_per_logs: Dict[str, List[str]] = {}
         for token, scene_dict_list in self.scene_frames_dicts.items():
             log_name = scene_dict_list[0]["log_name"]
@@ -141,10 +148,12 @@ class MetricCacheLoader:
         file_name: str = "metric_cache.pkl",
     ):
 
+        # metric cache 文件名（实际读取 metadata 指向的路径）
         self._file_name = file_name
         self.metric_cache_paths = self._load_metric_cache_paths(cache_path)
 
     def _load_metric_cache_paths(self, cache_path: Path) -> Dict[str, Path]:
+        """读取 metadata 中记录的 cache 路径，并建立 token -> 路径 映射。"""
         metadata_dir = cache_path / "metadata"
         metadata_file = [file for file in metadata_dir.iterdir() if ".csv" in str(file)][0]
         with open(str(metadata_file), "r") as f:
@@ -166,6 +175,7 @@ class MetricCacheLoader:
         return self.get_from_token(self.tokens[idx])
 
     def get_from_token(self, token: str) -> MetricCache:
+        """读取指定 token 对应的 MetricCache。"""
 
         with lzma.open(self.metric_cache_paths[token], "rb") as f:
             metric_cache: MetricCache = pickle.load(f)
@@ -173,6 +183,7 @@ class MetricCacheLoader:
         return metric_cache
 
     def to_pickle(self, path: Path) -> None:
+        """将所有 token 的 MetricCache 合并写入一个 pickle。"""
         full_metric_cache = {}
         for token in tqdm(self.tokens):
             full_metric_cache[token] = self.get_from_token(token)

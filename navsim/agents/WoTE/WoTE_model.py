@@ -1,3 +1,4 @@
+# WoTE 模型主体
 from re import T
 from typing import Dict
 import numpy as np
@@ -18,6 +19,7 @@ from navsim.agents.transfuser.transfuser_backbone import TransfuserBackbone
 from typing import Any, List, Dict, Union
 
 class ResNet34Backbone(nn.Module):
+    """简化的 ResNet34 Backbone（保留卷积层）。"""
     def __init__(self, pretrained=False):
         super(ResNet34Backbone, self).__init__()
         # Load a pre-trained ResNet-34 model
@@ -36,7 +38,7 @@ class WoTEModel(nn.Module):
                 ):
         super().__init__()
 
-        # Define constants as variables
+        # 常量超参
         STATUS_ENCODING_INPUT_DIM = 4 + 2 + 2
         hidden_dim = 256
         NUM_CLUSTERS = config.n_clusters if hasattr(config, 'n_clusters') else 256
@@ -51,7 +53,7 @@ class WoTEModel(nn.Module):
         SCORE_HEAD_OUTPUT_DIM = 1
         NUM_SCORE_HEADS = 5
 
-        # transfuser backbone
+        # Transfuser backbone（视觉 + LiDAR）
         self._backbone = TransfuserBackbone(config)
         self._bev_downscale = nn.Conv2d(512, config.tf_d_model, kernel_size=1)
 
@@ -64,7 +66,7 @@ class WoTEModel(nn.Module):
             num_keyval, config.tf_d_model
         )
 
-        # Load offline trajectories and MLP for planning vb feature
+        # 预计算的轨迹 anchors 与其特征编码
         cluster_file = config.cluster_file_path
         self.trajectory_anchors = torch.nn.Parameter(
             torch.tensor(np.load(cluster_file)),
@@ -77,7 +79,7 @@ class WoTEModel(nn.Module):
             nn.Linear(SCORE_HEAD_HIDDEN_DIM, hidden_dim),
         )
 
-        # Transformer Encoder for trajectory_anchors_feat
+        # 轨迹特征 Transformer 编码器
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim, 
             nhead=TRANSFORMER_NHEAD, 
@@ -87,7 +89,7 @@ class WoTEModel(nn.Module):
         )
         self.cluster_encoder = nn.TransformerEncoder(encoder_layer, num_layers=TRANSFORMER_NUM_LAYERS)
         
-        # latent world model
+        # Latent world model：对 BEV 场景进行时序/场景变换
         self.num_scenes = self.num_plan_queries + 1  # including the ego feat and action
         self.scene_position_embedding = nn.Embedding(self.num_scenes, hidden_dim)
 
@@ -106,7 +108,7 @@ class WoTEModel(nn.Module):
         )
         self.latent_world_model = nn.TransformerEncoder(wm_encoder_layer, num_layers=TRANSFORMER_NUM_LAYERS)
 
-        # reward conv net
+        # 奖励特征卷积网络
         self.num_fut_timestep = config.num_fut_timestep if hasattr(config, 'num_fut_timestep') else 4
         self.reward_conv_net = RewardConvNet(input_channels=(self.num_fut_timestep+1) * hidden_dim, conv1_out_channels=hidden_dim, conv2_out_channels=hidden_dim)
         self.reward_cat_head = nn.Sequential(
@@ -115,7 +117,7 @@ class WoTEModel(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # MLP head for scoring
+        # 轨迹评分 head（模仿奖励 + 多指标奖励）
         self.reward_head = nn.Sequential(
             nn.Linear(hidden_dim, SCORE_HEAD_HIDDEN_DIM),
             nn.ReLU(),
@@ -129,7 +131,7 @@ class WoTEModel(nn.Module):
             ) for _ in range(NUM_SCORE_HEADS)
         ])
 
-        # agent
+        # Agent 检测相关 head（可选）
         self.use_agent_loss = config.use_agent_loss if hasattr(config, 'use_agent_loss') else True
         if self.use_agent_loss:
             self.agent_query_embedding = nn.Embedding(config.num_bounding_boxes, hidden_dim)
@@ -149,7 +151,7 @@ class WoTEModel(nn.Module):
 
             self.agent_tf_decoder = nn.TransformerDecoder(agent_tf_decoder_layer, config.tf_num_layers)
 
-        # map
+        # BEV 语义分割 head（可选）
         self.use_map_loss = config.use_map_loss if hasattr(config, 'use_map_loss') else False
         if self.use_map_loss:
             self.bev_upsample_head = BEVUpsampleHead(config)
@@ -179,11 +181,11 @@ class WoTEModel(nn.Module):
             )
         self._bev_upscale = nn.Conv2d(config.tf_d_model, 512, kernel_size=1)
         
-        # future agent & map
+        # 未来帧的 Agent/Map 处理
         self.num_sampled_trajs = config.num_sampled_trajs if hasattr(config, 'num_sampled_trajs') else 1
         self.new_scene_bev_feature_pos_embed = nn.Embedding(self.num_plan_queries, hidden_dim)
 
-        # offset
+        # Trajectory offset 预测
         offset_tf_decoder_layer = nn.TransformerDecoderLayer(
             d_model=config.tf_d_model,
             nhead=config.tf_num_head,
@@ -229,7 +231,7 @@ class WoTEModel(nn.Module):
         """
         results = {}
 
-        # Extract input features
+        # 提取输入特征
         camera_feature = features["camera_feature"]
         lidar_feature = features["lidar_feature"]
         status_feature = features["status_feature"]
@@ -237,7 +239,7 @@ class WoTEModel(nn.Module):
         # Get batch size
         batch_size = status_feature.shape[0]
 
-        # Process backbone and BEV features
+        # Backbone & BEV 特征
         backbone_bev_feature, flatten_bev_feature = self._process_backbone_features(
             camera_feature, lidar_feature
         )
@@ -245,15 +247,15 @@ class WoTEModel(nn.Module):
         # Get ego status features
         ego_status_feat = self._get_ego_status_feature(status_feature)
 
-        # Get cluster center features
+        # 轨迹 anchors 编码
         init_trajectory_anchor = self.trajectory_anchors.unsqueeze(0).repeat(batch_size, 1, 1, 1)
         ego_feat_fixed_anchor_WoTE, num_traj = self.encode_traj_into_ego_feat(ego_status_feat, init_trajectory_anchor, batch_size)
 
-        # Optional offset prediction
+        # 轨迹 offset 预测
         offset_dict = self._predict_offset(ego_feat_fixed_anchor_WoTE, flatten_bev_feature)
         results.update(offset_dict)
         
-        # Optional losses
+        # 可选监督分支（Agent/Map）
         if self.use_agent_loss:
             agents, agents_query = self._process_agent(batch_size, flatten_bev_feature) #flatten_bev_feature.shape torch.Size([32, 32, 256])
             results.update(agents)
@@ -261,6 +263,7 @@ class WoTEModel(nn.Module):
             bev_semantic_map, upsampled_bev_feature = self._process_map(flatten_bev_feature, batch_size)
             results["bev_semantic_map"] = bev_semantic_map
 
+        # 评测时使用 offset 后的轨迹计算奖励
         if self.is_eval:
             trajectory_offset = offset_dict["trajectory_offset"]
             trajectory_offset_rewards = offset_dict["trajectory_offset_rewards"]
@@ -281,6 +284,7 @@ class WoTEModel(nn.Module):
         return trajectory_outputs
 
     def extract_reward_feature(self, trajectory_outputs, targets) -> Dict[str, torch.Tensor]:
+        """Part 2：结合 latent world model 生成奖励特征与未来 BEV。"""
         # Retrieve necessary variables from the previous intermediate results
         results = trajectory_outputs["results"]
         batch_size = trajectory_outputs["batch_size"]
@@ -288,7 +292,7 @@ class WoTEModel(nn.Module):
         flatten_bev_feature = trajectory_outputs["flatten_bev_feature"]
         ego_feat = trajectory_outputs["ego_feat"]
 
-        # Inject ego features into the BEV map
+        # 将 ego 特征注入 BEV
         flatten_bev_feature_multi_trajs = flatten_bev_feature.unsqueeze(1).repeat(
             1, num_traj, 1, 1
         )  # [batch_size, num_traj, H*W, C]
@@ -296,13 +300,13 @@ class WoTEModel(nn.Module):
             flatten_bev_feature_multi_trajs, ego_feat, num_traj
         )
 
-        # Process features through the latent world model
+        # 通过 latent world model 迭代预测未来
         ego_feat = ego_feat.reshape(batch_size * num_traj, 1, -1)
         flatten_bev_feature_multi_trajs = flatten_bev_feature_multi_trajs.reshape(
             batch_size * num_traj, self.num_plan_queries, -1
         )
 
-        # Multiple iterations
+        # 多步迭代
         num_iterations = self.num_fut_timestep
         interval = 8 // num_iterations
 
@@ -329,7 +333,7 @@ class WoTEModel(nn.Module):
         fut_ego_feat = ego_feat_list[-1]
         fut_flatten_bev_feature_multi_trajs = bev_feat_list[-1]
 
-        # Compute reward features
+        # 汇总 reward 特征
         reward_feature = self._compute_reward_feature(
             ego_feat_list,
             bev_feat_list,
@@ -339,7 +343,7 @@ class WoTEModel(nn.Module):
         results["reward_feature"] = reward_feature
 
         if targets is not None:
-            # Prepare future BEV features
+            # 采样未来 BEV 特征并生成语义图
             sampled_fut_flatten_bev_feature_multi_trajs = self._sample_future_bev_feature(
                 fut_flatten_bev_feature_multi_trajs,
                 batch_size,
@@ -572,7 +576,7 @@ class WoTEModel(nn.Module):
         dtype = bev_map.dtype
 
         delta_x, delta_y = delta_x_y[:, 0], delta_x_y[:, 1]
-        # Calculate the pixel-to-meter ratio
+        # 计算米到像素比例
         pixel_per_meter_x = H / 32.0  # 32 meters covered by H pixels
         pixel_per_meter_y = W / 64.0  # 64 meters covered by W pixels
 
@@ -580,7 +584,7 @@ class WoTEModel(nn.Module):
         h_idx = delta_x * pixel_per_meter_x  # (B,)
         w_idx = delta_y * pixel_per_meter_y + (W / 2.0)  # Origin at (0, W/2)
 
-        # Get four nearby integer pixel indices
+        # 取四邻域像素并按双线性权重分配
         h0 = torch.floor(h_idx).long()  # (B,)
         w0 = torch.floor(w_idx).long()  # (B,)
         h1 = h0 + 1
@@ -641,7 +645,7 @@ class WoTEModel(nn.Module):
         # Flatten bev_map to (B*C*H*W,)
         bev_map_flat = bev_map.reshape(-1)  # (B*C*H*W,)
 
-        # Use index_add_ to accumulate weighted features at corresponding positions
+        # 使用 index_add_ 累积加权特征
         bev_map_flat.index_add_(0, linear_indices, weighted_features_flat)
 
         # Reshape the BEV feature map back to (B, C, H, W)
@@ -650,28 +654,29 @@ class WoTEModel(nn.Module):
         return updated_bev_map
     
     def select_best_trajectory(self, final_rewards, trajectory_anchors, batch_size):
+        """从奖励中选出最佳轨迹并 reshape 为 (B, T, 3)。"""
         best_trajectory_idx = torch.argmax(final_rewards, dim=-1)  # Shape: [batch_size]
         poses = trajectory_anchors[best_trajectory_idx]  # Shape: [batch_size, 24]
         poses = poses.view(batch_size, 8, 3)  # Reshape to [batch_size, 8, 3]
         return poses
 
     def forward_test(self, features, targets=None) -> Dict[str, torch.Tensor]:
-        # Extract scene feature encoding
+        # 评测：提取特征并打分
         self.is_eval = True
         encoder_results = self.process_trajectory_and_reward(features)
         cluster_feaure = encoder_results["reward_feature"]
         batch_size = cluster_feaure.shape[0]
 
-        # Reward each trajectory using MLP head
+        # 模仿奖励
         im_rewards = self.reward_head(cluster_feaure).squeeze(-1)  # Shape: [batch_size, 256]
         im_rewards_softmax = torch.softmax(im_rewards, dim=-1)  # Shape: [batch_size, *, 256]
 
-        # Reward each trajectory using the additional metric reward heads if use_sim_reward is enabled
+        # 指标奖励
         sim_rewards = [reward_head(cluster_feaure) for reward_head in self.sim_reward_heads]
         sim_rewards = [reward.sigmoid() for reward in sim_rewards]  # Apply sigmoid to each metric reward
         final_rewards = self.weighted_reward_calculation(im_rewards_softmax, sim_rewards)
 
-        # Select the trajectory
+        # 选择最佳轨迹
         offset = encoder_results['trajectory_offset'].squeeze(0)
         trajectory_anchors = self.trajectory_anchors + offset
         poses = self.select_best_trajectory(final_rewards, trajectory_anchors, batch_size)
@@ -685,19 +690,20 @@ class WoTEModel(nn.Module):
         return results
 
     def forward_train(self, features, targets=None) -> Dict[str, torch.Tensor]:
+        """训练：输出奖励预测与可选分支预测。"""
         self.is_eval = False
         # Extract scene feature encoding
         result = {}
         encoder_results = self.process_trajectory_and_reward(features, targets)
         cluster_feaure = encoder_results.pop("reward_feature")
 
-        # Reward each trajectory using MLP head
+        # 模仿奖励
         im_rewards = self.reward_head(cluster_feaure).squeeze(-1)  # Shape: [batch_size, 256]
         im_rewards_softmax = torch.softmax(im_rewards, dim=-1)  # Shape: [batch_size, *, 256]
         result["im_rewards"] = im_rewards_softmax
 
         result["trajectory_anchors"] = self.trajectory_anchors
-        # Reward each trajectory using the additional metric reward heads if use_sim_reward is enabled
+        # 指标奖励（多头）
         sim_rewards = [sim_reward_head(cluster_feaure) for sim_reward_head in self.sim_reward_heads]
         sim_rewards = torch.cat(sim_rewards, dim=-1).permute(0, 2, 1).sigmoid()  # Concatenate metric rewards
         result["sim_rewards"] = sim_rewards
@@ -721,12 +727,12 @@ class WoTEModel(nn.Module):
             torch.Tensor: Final weighted reward for each trajectory. Shape: [batch_size, num_traj]
         """
         assert len(sim_rewards) == 5, "Expected 4 metric rewards: S_NC, S_DAC, S_TTC, S_EP, S_COMFORT"
-        # Extract metric rewards
+        # 展开各指标
         w = self.reward_weights
         S_NC, S_DAC, S_EP, S_TTC, S_COMFORT = sim_rewards
         S_NC, S_DAC, S_EP, S_TTC, S_COMFORT = S_NC.squeeze(-1), S_DAC.squeeze(-1), S_EP.squeeze(-1), S_TTC.squeeze(-1), S_COMFORT.squeeze(-1)
         #self.metric_keys = ['no_at_fault_collisions', 'drivable_area_compliance', 'ego_progress', 'time_to_collision_within_bound', 'comfort']
-        # Calculate assembled cost based on the provided formula
+        # 组合 reward（对数空间加权）
         assembled_cost = (
             w[0] * torch.log(im_rewards) +
             w[1] * torch.log(S_NC) +
@@ -760,6 +766,7 @@ class AgentHead(nn.Module):
 
     def forward(self, agent_queries) -> Dict[str, torch.Tensor]:
 
+        # 预测 box 参数并限制范围
         agent_states = self._mlp_states(agent_queries) # agent_states: torch.Size([32, 30, 5])
         agent_states[..., BoundingBox2DIndex.POINT] = (
             agent_states[..., BoundingBox2DIndex.POINT].tanh() * 32
@@ -810,6 +817,7 @@ class BEVUpsampleHead(nn.Module):
         )
 
     def forward(self, x):
+        """上采样 BEV 特征并融合侧连接。"""
         p5 = self.relu(self.c5_conv(x))
         p4 = self.relu(self.up_conv5(self.upsample(p5)))
         p3 = self.relu(self.up_conv4(self.upsample2(p4)))
@@ -885,6 +893,7 @@ class TrajectoryOffsetHead(nn.Module):
         )
 
     def forward(self, object_queries) -> Dict[str, torch.Tensor]:
+        """预测每条轨迹的 offset（x,y,heading）。"""
         bz, num_trajs, _ = object_queries.shape
         poses = self._mlp(object_queries).reshape(bz, -1, self._num_poses, StateSE2Index.size())
         poses[..., StateSE2Index.HEADING] = poses[..., StateSE2Index.HEADING].tanh() * np.pi

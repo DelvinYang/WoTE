@@ -1,3 +1,4 @@
+# 数据类与场景相关结构体定义
 from __future__ import annotations
 
 import io
@@ -24,13 +25,16 @@ from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple, BinaryIO, Union
 
 
+# 轨迹采样默认间隔
 NAVSIM_INTERVAL_LENGTH: float = 0.5
+# 依赖环境变量配置的数据路径
 OPENSCENE_DATA_ROOT = os.environ.get("OPENSCENE_DATA_ROOT")
 NUPLAN_MAPS_ROOT = os.environ.get("NUPLAN_MAPS_ROOT")
 
 
 @dataclass
 class Camera:
+    """单个相机帧及标定信息。"""
     image: Optional[npt.NDArray[np.float32]] = None
 
     sensor2lidar_rotation: Optional[npt.NDArray[np.float32]] = None
@@ -41,6 +45,7 @@ class Camera:
 
 @dataclass
 class Cameras:
+    """多相机组合（8 路）。"""
 
     cam_f0: Camera
     cam_l0: Camera
@@ -58,6 +63,7 @@ class Cameras:
         camera_dict: Dict[str, Any],
         sensor_names: List[str],
     ) -> Cameras:
+        """从原始字典加载相机图像与标定。"""
 
         data_dict: Dict[str, Camera] = {}
         for camera_name in camera_dict.keys():
@@ -88,6 +94,7 @@ class Cameras:
 
 @dataclass
 class Lidar:
+    """合并后的 LiDAR 点云。"""
 
     # NOTE:
     # merged lidar point cloud as (6,n) float32 array with n points
@@ -106,6 +113,7 @@ class Lidar:
         lidar_path: Path,
         sensor_names: List[str],
     ) -> Lidar:
+        """按传感器配置决定是否加载 LiDAR。"""
 
         # NOTE: this could be extended to load specific LiDARs in the merged pc
         if "lidar_pc" in sensor_names:
@@ -117,6 +125,7 @@ class Lidar:
 
 @dataclass
 class EgoStatus:
+    """自车状态（位置、速度、加速度等）。"""
 
     ego_pose: npt.NDArray[np.float64]
     ego_velocity: npt.NDArray[np.float32]
@@ -127,6 +136,7 @@ class EgoStatus:
 
 @dataclass
 class AgentInput:
+    """提供给 Agent 的输入封装。"""
 
     ego_statuses: List[EgoStatus]
     cameras: List[Cameras]
@@ -141,6 +151,7 @@ class AgentInput:
         sensor_config: SensorConfig,
         use_fut_frames: bool = False,
     ) -> AgentInput:
+        """从场景帧字典生成 AgentInput（支持未来帧）。"""
         assert len(scene_dict_list) > 0, "Scene list is empty!"
 
         global_ego_poses = []
@@ -153,6 +164,7 @@ class AgentInput:
             )
             global_ego_poses.append(global_ego_pose)
 
+        # 将全局自车位姿转换到相对坐标
         local_ego_poses = convert_absolute_to_relative_se2_array(
             StateSE2(*global_ego_poses[-1]), np.array(global_ego_poses, dtype=np.float64)
         )
@@ -161,6 +173,7 @@ class AgentInput:
         cameras: List[EgoStatus] = []
         lidars: List[Lidar] = []
 
+        # 是否拼接未来帧
         if use_fut_frames:
             num_future_frames = 10
             len_frame = num_history_frames + num_future_frames # num_future_frames=10
@@ -168,6 +181,7 @@ class AgentInput:
             len_frame = num_history_frames
 
         for frame_idx in range(len_frame):
+            # 仅历史帧包含 ego 动态状态
             if frame_idx < num_history_frames:
                 ego_dynamic_state = scene_dict_list[frame_idx]["ego_dynamic_state"]
                 ego_status = EgoStatus(
@@ -178,6 +192,7 @@ class AgentInput:
                 )
                 ego_statuses.append(ego_status)
 
+            # 根据传感器配置按帧选择传感器
             sensor_names = sensor_config.get_sensors_at_iteration(frame_idx)
             cameras.append(
                 Cameras.from_camera_dict(
@@ -228,6 +243,7 @@ class AgentInput:
 
 @dataclass
 class Annotations:
+    """检测/跟踪标注信息。"""
 
     boxes: npt.NDArray[np.float32]
     names: List[str]
@@ -246,6 +262,7 @@ class Annotations:
 
 @dataclass
 class Trajectory:
+    """轨迹（相对坐标）。"""
     poses: npt.NDArray[np.float32]  # local coordinates
     trajectory_sampling: TrajectorySampling = TrajectorySampling(
         time_horizon=4, interval_length=0.5
@@ -263,6 +280,7 @@ class Trajectory:
 
 @dataclass
 class SceneMetadata:
+    """场景元数据。"""
     log_name: str
     scene_token: str
     map_name: str
@@ -274,6 +292,7 @@ class SceneMetadata:
 
 @dataclass
 class Frame:
+    """单帧场景数据。"""
 
     token: str
     timestamp: int
@@ -288,6 +307,7 @@ class Frame:
 
 @dataclass
 class Scene:
+    """完整场景，包含地图与帧序列。"""
 
     # Ground truth information
     scene_metadata: SceneMetadata
@@ -298,6 +318,7 @@ class Scene:
                         num_trajectory_frames: Optional[int] = None, 
                         frame_offset = 0
                     ) -> Trajectory:
+        """获取未来轨迹（相对坐标）。"""
 
         if num_trajectory_frames is None:
             num_trajectory_frames = self.scene_metadata.num_future_frames
@@ -308,6 +329,7 @@ class Scene:
         for frame_idx in range(start_frame_idx, start_frame_idx + num_trajectory_frames + 1):
             global_ego_poses.append(self.frames[frame_idx].ego_status.ego_pose)
 
+        # 从第一帧起转换为相对轨迹
         local_ego_poses = convert_absolute_to_relative_se2_array(
             StateSE2(*global_ego_poses[0]), np.array(global_ego_poses[1:], dtype=np.float64)
         )
@@ -321,6 +343,7 @@ class Scene:
         )
 
     def get_history_trajectory(self, num_trajectory_frames: Optional[int] = None) -> Trajectory:
+        """获取历史轨迹（相对坐标）。"""
 
         if num_trajectory_frames is None:
             num_trajectory_frames = self.scene_metadata.num_history_frames
@@ -343,6 +366,7 @@ class Scene:
         )
 
     def get_agent_input(self, use_fut_frames=False) -> AgentInput:
+        """将 Scene 转为 AgentInput（可选未来帧）。"""
 
         local_ego_poses = self.get_history_trajectory().poses
         ego_statuses: List[EgoStatus] = []
@@ -373,6 +397,7 @@ class Scene:
 
     @classmethod
     def _build_map_api(cls, map_name: str) -> AbstractMap:
+        """构建地图 API。"""
         assert (
             map_name in MAP_LOCATIONS
         ), f"The map name {map_name} is invalid, must be in {MAP_LOCATIONS}"
@@ -383,6 +408,7 @@ class Scene:
         cls,
         scene_frame: Dict,
     ) -> Annotations:
+        """从原始帧字典构建标注对象。"""
         return Annotations(
             boxes=scene_frame["anns"]["gt_boxes"],
             names=scene_frame["anns"]["gt_names"],
@@ -396,6 +422,7 @@ class Scene:
         cls,
         scene_frame: Dict,
     ) -> EgoStatus:
+        """从原始帧字典构建 EgoStatus（全局坐标）。"""
         ego_translation = scene_frame["ego2global_translation"]
         ego_quaternion = Quaternion(*scene_frame["ego2global_rotation"])
         global_ego_pose = np.array(
@@ -420,6 +447,7 @@ class Scene:
         num_future_frames: int,
         sensor_config: SensorConfig,
     ) -> Scene:
+        """从帧字典列表构建 Scene。"""
         assert len(scene_dict_list) >= 0, "Scene list is empty!"
 
         scene_metadata = SceneMetadata(
@@ -468,6 +496,7 @@ class Scene:
 
 @dataclass
 class SceneFilter:
+    """场景过滤配置（历史/未来帧、token、log 等）。"""
 
     num_history_frames: int = 4
     num_future_frames: int = 10
@@ -494,11 +523,13 @@ class SceneFilter:
 
     @property
     def num_frames(self) -> int:
+        """历史帧 + 未来帧总数。"""
         return self.num_history_frames + self.num_future_frames
 
 
 @dataclass
 class SensorConfig:
+    """传感器启用配置（bool 或指定帧索引）。"""
 
     # Config values of sensors are either
     # - bool: Whether to load history or not
@@ -515,6 +546,7 @@ class SensorConfig:
     lidar_pc: Union[bool, List[int]]
 
     def get_sensors_at_iteration(self, iteration: int) -> List[str]:
+        """返回该帧需要加载的传感器名称。"""
 
         sensors_at_iteration: List[str] = []
         for sensor_name, sensor_include in asdict(self).items():
@@ -527,6 +559,7 @@ class SensorConfig:
 
     @classmethod
     def build_cam_f0_only(cls, include: Union[bool, List[int]] = True) -> SensorConfig:
+        """只加载前向相机。"""
         return SensorConfig(
             cam_f0=include,
             # cam_f0=True,
@@ -542,6 +575,7 @@ class SensorConfig:
     
     @classmethod
     def build_lidar_only(cls, include: Union[bool, List[int]] = True) -> SensorConfig:
+        """只加载 LiDAR。"""
         return SensorConfig(
             cam_f0=False,
             cam_l0=False,
@@ -556,6 +590,7 @@ class SensorConfig:
     
     @classmethod
     def build_tfu_sensors(cls, include: Union[bool, List[int]] = True) -> SensorConfig:
+        """TFU 论文常用的相机+LiDAR配置。"""
         return SensorConfig(
             cam_f0=include,
             cam_l0=include,
@@ -570,10 +605,12 @@ class SensorConfig:
     
     @classmethod
     def build_no_sensors(cls) -> SensorConfig:
+        """不加载任何传感器。"""
         return cls.build_all_sensors(include=False)
 
     @classmethod
     def build_all_sensors(cls, include: Union[bool, List[int]] = True) -> SensorConfig:
+        """加载所有传感器。"""
         return SensorConfig(
             cam_f0=include,
             cam_l0=include,
@@ -589,6 +626,7 @@ class SensorConfig:
 
 @dataclass
 class PDMResults:
+    """PDM 评分结果集合。"""
 
     no_at_fault_collisions: float
     drivable_area_compliance: float

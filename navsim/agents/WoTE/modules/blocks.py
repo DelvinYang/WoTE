@@ -1,3 +1,4 @@
+# 通用模块与注意力块
 from typing import List, Optional, Tuple
 import math
 import numpy as np
@@ -6,6 +7,7 @@ import torch.nn as nn
 from torch.cuda.amp.autocast_mode import autocast
 
 def linear_relu_ln(embed_dims, in_loops, out_loops, input_dims=None):
+    """构建 Linear+ReLU+LayerNorm 的重复堆叠。"""
     if input_dims is None:
         input_dims = embed_dims
     layers = []
@@ -40,6 +42,7 @@ def bias_init_with_prob(prior_prob):
 
 
 class GridSampleCrossBEVAttention(nn.Module):
+    """在 BEV 特征图上按轨迹点 grid_sample 的注意力模块。"""
     def __init__(self, embed_dims, num_heads, num_levels=1, in_bev_dims=64, num_points=8, config=None):
         super(GridSampleCrossBEVAttention, self).__init__()
         self.embed_dims = embed_dims

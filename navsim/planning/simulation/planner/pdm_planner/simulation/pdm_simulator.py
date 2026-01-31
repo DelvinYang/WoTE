@@ -1,3 +1,4 @@
+# PDM 仿真器：批量模拟轨迹
 import numpy as np
 import numpy.typing as npt
 from nuplan.common.actor_state.ego_state import EgoState
@@ -29,10 +30,10 @@ class PDMSimulator:
         :param proposal_sampling: Sampling parameters for proposals
         """
 
-        # time parameters
+        # 采样参数
         self.proposal_sampling = proposal_sampling
 
-        # simulation objects
+        # 仿真器组件
         self._motion_model = BatchKinematicBicycleModel()
         self._tracker = BatchLQRTracker()
 
@@ -47,35 +48,39 @@ class PDMSimulator:
         """
 
         # TODO: find cleaner way to load parameters
-        # set parameters of motion model and tracker
+        # 设置运动模型/追踪器的参数
         self._motion_model._vehicle = initial_ego_state.car_footprint.vehicle_parameters
         self._tracker._discretization_time = self.proposal_sampling.interval_length
 
+        # 只取需要的步数
         proposal_states = states[:, : self.proposal_sampling.num_poses + 1]
         self._tracker.update(proposal_states)
 
-        # state array representation for simulated vehicle states
+        # 模拟状态数组
         simulated_states = np.zeros(proposal_states.shape, dtype=np.float64)
         simulated_states[:, 0] = ego_state_to_state_array(initial_ego_state)
 
-        # timing objects
+        # 时间相关对象
         current_time_point = initial_ego_state.time_point
         delta_time_point = TimeDuration.from_s(self.proposal_sampling.interval_length)
 
         current_iteration = SimulationIteration(current_time_point, 0)
         next_iteration = SimulationIteration(current_time_point + delta_time_point, 1)
 
+        # 逐步仿真
         for time_idx in range(1, self.proposal_sampling.num_poses + 1):
             sampling_time: TimePoint = (
                 next_iteration.time_point - current_iteration.time_point
             )
 
+            # 追踪器给出控制量
             command_states = self._tracker.track_trajectory(
                 current_iteration,
                 next_iteration,
                 simulated_states[:, time_idx - 1],
             )
 
+            # 运动模型推进状态
             simulated_states[:, time_idx] = self._motion_model.propagate_state(
                 states=simulated_states[:, time_idx - 1],
                 command_states=command_states,

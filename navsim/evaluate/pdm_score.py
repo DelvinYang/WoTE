@@ -1,3 +1,4 @@
+# 评测工具：PDM score 计算与可视化
 import numpy as np
 import numpy.typing as npt
 
@@ -5,11 +6,13 @@ from typing import List
 import os
 import matplotlib.pyplot as plt
 
+# nuPlan 轨迹变换工具
 from nuplan.planning.simulation.planner.ml_planner.transform_utils import (
     _get_fixed_timesteps,
     _se2_vel_acc_to_ego_state,
 )
 
+# PDM 相关组件
 from navsim.planning.simulation.planner.pdm_planner.simulation.pdm_simulator import (
     PDMSimulator,
 )
@@ -24,6 +27,7 @@ from navsim.planning.simulation.planner.pdm_planner.utils.pdm_geometry_utils imp
     convert_absolute_to_relative_se2_array,
 )
 
+# nuPlan 轨迹与状态结构
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.common.actor_state.state_representation import StateSE2, TimePoint
@@ -48,11 +52,13 @@ def transform_trajectory(
     :return: nuPlan's InterpolatedTrajectory
     """
 
+    # 采样配置
     future_sampling = pred_trajectory.trajectory_sampling
     timesteps = _get_fixed_timesteps(
         initial_ego_state, future_sampling.time_horizon, future_sampling.interval_length
     )
 
+    # 相对坐标 -> 绝对坐标
     relative_poses = np.array(pred_trajectory.poses, dtype=np.float64)
     relative_states = [StateSE2.deserialize(pose) for pose in relative_poses]
     absolute_states = relative_to_absolute_poses(initial_ego_state.rear_axle, relative_states)
@@ -86,6 +92,7 @@ def get_trajectory_as_array(
     :return: Array of interpolated trajectory states.
     """
 
+    # 按采样时间构建时间戳
     times_s = np.arange(
         0.0,
         future_sampling.time_horizon + future_sampling.interval_length,
@@ -115,11 +122,13 @@ def pdm_score(
     :return: Dataclass of PDM-Subscores.
     """
 
+    # 读取初始状态与基准轨迹
     initial_ego_state = metric_cache.ego_state
 
     pdm_trajectory = metric_cache.trajectory
     pred_trajectory = transform_trajectory(model_trajectory, initial_ego_state)
 
+    # 转为数组并拼接
     pdm_states, pred_states = (
         get_trajectory_as_array(pdm_trajectory, future_sampling, initial_ego_state.time_point),
         get_trajectory_as_array(pred_trajectory, future_sampling, initial_ego_state.time_point),
@@ -127,8 +136,10 @@ def pdm_score(
 
     trajectory_states = np.concatenate([pdm_states[None, ...], pred_states[None, ...]], axis=0)
 
+    # 仿真预测轨迹
     simulated_states = simulator.simulate_proposals(trajectory_states, initial_ego_state)
 
+    # 评分
     scores = scorer.score_proposals(
         simulated_states,
         metric_cache.observation,
@@ -152,6 +163,7 @@ def pdm_score(
 
     score = scores[pred_idx]
 
+    # 组装结果
     return PDMResults(
         no_at_fault_collisions,
         drivable_area_compliance,
@@ -176,6 +188,7 @@ def pdm_score_multi_trajs(
     :return: Dataclass of PDM-Subscores.
     """
 
+    # 读取初始状态与基准轨迹
     initial_ego_state = metric_cache.ego_state
 
     pdm_trajectory = metric_cache.trajectory

@@ -1,3 +1,4 @@
+# 多模态损失工具
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,6 +113,7 @@ def py_sigmoid_focal_loss(pred,
 
 
 class DDLossComputer(nn.Module):
+    """多模态轨迹的分类+回归损失。"""
     def __init__(self, config):
         self._config = config
         super(DDLossComputer, self).__init__()
